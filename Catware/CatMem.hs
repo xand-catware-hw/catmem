@@ -1,8 +1,7 @@
 
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeFamilies #-}
-
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Catware.CatMem where
 --
@@ -15,178 +14,142 @@ module Catware.CatMem where
 --
 -- The cat sees and it remembers.
 
-import              Control.Applicative
-import              Control.Monad
-import              Data.Eq
-import              Data.Function
-import              Data.Functor
-import qualified    Data.Kind as Kind
-import              Data.Maybe
-import              Data.Tuple
-import              GHC.Enum
-import              GHC.Int
-import              GHC.TypeLits
+import Control.Applicative
+import Data.Function
+import Data.Functor
+import Data.Int
+import Data.Maybe
+import Data.Tuple
+import GHC.Enum
+import GHC.TypeLits
 
-import              Clash.Prelude.RAM
-import              Clash.Promoted.Nat
-import              Clash.Signal
-import              Clash.Sized.Vector
-import              Clash.XException
+import Clash.Prelude.RAM
+import Clash.Promoted.Nat
+import Clash.Signal
+import Clash.XException
 
 
 
--- | Type-checked, categorically semantic memory types.
+-- | Memory with categorical semantics.
 --
--- Non-contradiction should be enforced by the type system. But
--- typechecking can only make guarantees about types that are
--- themselves restricted to correct and consistent values.
+-- The semantics of memory are often different from the literal
+-- values stored in the circuit. Consider a counter: the counter
+-- may count up by one, count down by one, or do nothing. It stores
+-- the current count as its value. It would violate the semantics
+-- of the counter for it to increase its count by two, or decrease
+-- it by two. 
 --
--- Consider the category of memory types: every memory type is either
--- primitive, or a product of precursor types. The same is true when
--- it comes to updating those memories.
+-- The behaviour of memory on updates must be constrained in some
+-- way for the typechecker to guarantee semantic correctness of
+-- changes. Let C be the type of all possible changes to the
+-- memory value, and let B be the type of all semantically correct
+-- behaviours. We constrain changes by providing a map
+-- @h : B -> C@ which sends behaviours to their prescribed
+-- changes.
 --
--- The problem with the category of memories when it comes to
--- typechecking is that products are "too permissive". While
--- we can enforce the correctness of individual primitives, there is
--- nothing to restrict how they act when put together.
+-- Returning to the counter example, the semantic behaviours are
+-- B := CountUp, CountDown, Stop. We can define the map
+--  >>> toChange :: B -> (p -> Maybe p)
+--  >>> toChange CountUp   = Just . succ
+--  >>> toChange CountDown = Just . pred
+--  >>> toChange Stop      = const Nothing
+-- Therefore, we have a direct conversion between semantic meaning
+-- and literal value-updates. With the constraint in place,
+-- there's no worry that our circuit might be connected improperly.
 --
--- For a concrete example, take queues and stacks. Both are similar
--- in their construction, being made of a RAM block and a counter.
--- If we naively leave it at that, then there's no guarantee that a
--- stack will indeed behave like a stack and not a queue.
+data CatMem mem view behaviour change
+    = CatMem
+        { toChange :: behaviour -> change
+        -- ^ Convert an abstract behaviour into a concrete change on
+        -- the memory value.
+        , memorize :: forall dom. HiddenClockResetEnable dom
+                   => mem
+                   -> Signal dom change
+                   -> Signal dom view
+        -- ^ Take a stream of changes to produce a stream of output
+        -- values.
+        }
+
+-- | Run a memory on its semantic behaviours.
 --
--- To properly make guarantees about the correctness of memory updates,
--- their type must be restricted to only allow the correct kinds of
--- actions.
+-- An interesting note is that memories with semantics are
+-- propositional types. They say "if you have a memory function,
+-- and a way to constrain it to some semantics, then you have
+-- a semantic memory." This function says in turn "if you have
+-- a proof that something is a semantic memory, then I can provide
+-- an equivalent abstract memory function."
 --
--- Let V be a category of memory types. Define B to be a memory
--- /behaviour/ for some memory M in V if there is a heteromorphism
--- @h : B -> V (M, M)@ that sends B to automorphisms on M.
+-- The realization of semantic memories as propositional types
+-- may have implications on the philosophical conception of
+-- hardware devices. The notion might be extended usefully to
+-- other areas of the system.
 --
--- Each B is a collection of behaviours valid for a specific domain.
--- Thus typechecking guarantees the validity of memory behaviours
--- as long as the heteromorphism is correct.
+runMem
+    :: HiddenClockResetEnable dom
+    => CatMem m v b c
+    -> m
+    -> Signal dom b
+    -> Signal dom v
+runMem (CatMem c m) r = m r . fmap c
+
+
+-- | Common register with enable.
 --
-class CatMem mem behaviour where
+type Reg a = CatMem a a (Maybe a) (Maybe a)
 
-    -- | Automorphisms on unspecialized memory.
-    --
-    -- In cases where the new value of a memory depends on its old
-    -- value, we can use a lambda taking @ViewOf mem@, and wire it
-    -- up in @catmem'@.
-    --
-    -- Otherwise, a simpler type will suffice.
-    --
-    data MemMorph mem behaviour :: Kind.Type
-    
-    -- | Send a behaviour to a concrete automorphism on our memory type.
-    --
-    memMorph :: behaviour -> MemMorph mem behaviour
-
-    type ViewOf mem :: Kind.Type
-    type instance ViewOf mem = View mem
-    
-    -- | Apply a stream of automorphisms to the starting value to get
-    -- a stream of viewable values.
-    --
-    catmem'
-        :: HiddenClockResetEnable dom
-        => mem
-        -> Signal dom (MemMorph mem behaviour)
-        -> Signal dom (ViewOf mem)
-
--- | Compose a behaviour heteromorphism with @catmem'@ to get an
--- abstract memory component.
+-- | Registers are very straightforward: their semantics are the
+-- same as their changes. They only need to be constrained by 'id'.
 --
-catmem
-    :: CatMem mem behaviour
-    => HiddenClockResetEnable dom
-    => mem
-    -> Signal dom behaviour
-    -> Signal dom (ViewOf mem)
-catmem reset = catmem' reset . fmap memMorph
+catReg :: NFDataX a => Reg a
+catReg = CatMem id regMaybe
 
 
-data family View m   :: Kind.Type
-
--- | Avoid namespace pollution by using the 'Change' data family for
--- single-use behaviours.
+-- | Semantics of random access readable memories.
 --
-data family Change m :: Kind.Type
+data RandomRead (n :: Nat) a
+    = Read Int
 
-
--- | Simple register storing exactly one value.
+-- | Semantics of random access writeable memories.
 --
-newtype Reg a = Reg a
-
-instance NFDataX a => CatMem (Reg a) (Maybe a) where   
-    newtype MemMorph (Reg a) _ =
-        MkRegMorph { runRegMorph :: Maybe a }
-    -- ^ Very simple morphisms that forget the previous value, and replace
-    -- it with a new one.
-    
-    memMorph = MkRegMorph
-
-    type ViewOf (Reg a) = a
-    
-    catmem' (Reg reset) = regMaybe reset . fmap runRegMorph
-    
-
-type RandomAccess (n :: Nat) a = (Int, RandomWrite n a)
-
 data RandomWrite (n :: Nat) a
-    = RamWrite Int a
-    | RamNothing
+    = Write Int a
+    | DontWrite
 
--- | Asynchronous RAM blocks whose values aren't defined until written.
+-- | Semantics of random access read/write memories.
 --
-data AsyncRam (n :: Nat) a = AsyncRam
+type RandomAccess (n :: Nat) a = (RandomRead n a, RandomWrite n a)
 
-instance (KnownNat n, NFDataX a)
-    => CatMem (AsyncRam n a) (Int, RandomWrite n a)
-  where    
-    data MemMorph (AsyncRam n a) _ = MkAsyncRamMorph
-        { read  :: Int
-        , write :: Maybe (Int, a) }
-    -- ^ RAM types have more complex morphisms that must capture both
-    -- read and write behaviours.
-    -- Fortunately, very easy with a product type.
-    
-    memMorph (readIx, w) = MkAsyncRamMorph readIx $ case w of
-        RamNothing         -> Nothing
-        RamWrite writeIx d -> Just (writeIx, d)
+type AsyncRam n a =
+    CatMem (SNat n) a (RandomAccess n a) (Int, Maybe (Int, a))
 
-    type ViewOf (AsyncRam n a) = a
-       
-    catmem' (AsyncRam :: AsyncRam n a) x =
-        asyncRam (SNat :: SNat n) (read <$> x) (write <$> x)
+catAsyncRam :: NFDataX a => AsyncRam n a
+catAsyncRam = CatMem {..} where
+    toChange (Read readIx, write) = case write of
+        Write writeIx a -> (readIx, Just (writeIx, a))
+        DontWrite       -> (readIx, Nothing)
 
-    
-newtype Counter a = Counter a
+    memorize sn c = asyncRam sn (fst <$> c) (snd <$> c)
 
-data instance Change (Counter a)
+
+-- | Semantics of counters.
+--
+data CountDirection
     = CountUp
     | CountDown
     | DontCount
-    
-instance (Enum a, NFDataX a)
-    => CatMem (Counter a) (Change (Counter a))
-  where    
-    newtype MemMorph (Counter a) _ =
-        MkCounterMorph { runCounterMorph :: a -> Maybe a }
-    -- ^ Counters showcase types whose abstract behaviour has a finite
-    -- number of correct values, but whose internal value may be infinite,
-    -- and depends on the prior value.
-    
-    memMorph = MkCounterMorph . \case
-        CountUp   -> Just . succ
-        CountDown -> Just . pred
-        DontCount -> const Nothing
 
-    type ViewOf (Counter a) = a
-    
-    catmem' (Counter a) f = y where
-        x = runCounterMorph <$> f <*> y
-        y = regMaybe a x
+type Counter a
+    = CatMem a a CountDirection (a -> Maybe a)
 
+-- | Complete form of the counter example above.
+--
+catCounter :: (Enum a, NFDataX a) => Counter a
+catCounter = CatMem {..} where
+    toChange CountUp   = Just . succ
+    toChange CountDown = Just . pred
+    toChange DontCount = const Nothing
+
+    memorize reset c = y where
+        x = c <*> y
+        y = regMaybe reset x
 
