@@ -106,23 +106,26 @@ catReg = CatMem id regMaybe
 
 -- | Semantics of random access readable memories.
 --
-data RandomRead (n :: Nat) a
-    = Read Int
+data RandomRead index a
+    = Read index
 
 -- | Semantics of random access writeable memories.
 --
-data RandomWrite (n :: Nat) a
-    = Write Int a
+data RandomWrite index a
+    = Write index a
     | DontWrite
 
 -- | Semantics of random access read/write memories.
 --
-type RandomAccess (n :: Nat) a = (RandomRead n a, RandomWrite n a)
+type RandomAccess index a =
+    (RandomRead index a, RandomWrite index a)
 
-type AsyncRam n a =
-    CatMem (SNat n) a (RandomAccess n a) (Int, Maybe (Int, a))
+type AsyncRam n index a =
+    CatMem (SNat n) a (RandomAccess index a) (index, Maybe (index, a))
 
-catAsyncRam :: NFDataX a => AsyncRam n a
+catAsyncRam
+    :: (Enum index, NFDataX index, NFDataX a)
+    => AsyncRam n index a
 catAsyncRam = CatMem {..} where
     toChange (Read readIx, write) = case write of
         Write writeIx a -> (readIx, Just (writeIx, a))
