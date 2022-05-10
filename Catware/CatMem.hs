@@ -93,6 +93,42 @@ runMem
 runMem (CatMem c m) r = m r . fmap c
 
 
+-- | Create a Mealy machine from a CatMem and transition
+-- function.
+--
+catMealy
+    :: HiddenClockResetEnable dom
+    => CatMem m v b c
+    -> m
+    -> (i -> v -> (o, b))
+    -> Signal dom i
+    -> Signal dom o
+catMealy m r f i =
+    let y = f <$> i <*> x
+        x = runMem m r $ snd <$> y
+    in fst <$> y
+
+-- | Create a Mealy machine from a CatMem that takes a transition
+-- function already fmapped into Signal.
+--
+-- Sometimes we want to Mealy a function that has several inputs, in
+-- which case it can be very convenient to do:
+--  >>> main cMem rst in1 in2 in3 = out where
+--  >>>   trans = f <$> in1 <*> in2 <*> in3
+--  >>>   out   = catMealyA cMem rst trans
+--
+catMealyA
+    :: HiddenClockResetEnable dom
+    => CatMem m v b c
+    -> m
+    -> Signal dom (v -> (o, b))
+    -> Signal dom o
+catMealyA m r f =
+    let y = f <*> x
+        x = runMem m r $ snd <$> y
+    in fst <$> y
+
+
 -- | Common register with enable.
 --
 type Reg a = CatMem a a (Maybe a) (Maybe a)
