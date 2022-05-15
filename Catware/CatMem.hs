@@ -159,13 +159,22 @@ type RandomAccess index a =
 type AsyncRam n index a =
     CatMem (SNat n) a (RandomAccess index a) (index, Maybe (index, a))
 
+-- | The semantics of random-access memories are split into reading and
+-- writing. We always read from RAM, and can optionally write new data
+-- to it.
+--
+-- The literal changes are similar, though they use general rather than
+-- dedicated types.
+--
 catAsyncRam
     :: (Enum index, NFDataX index, NFDataX a)
     => AsyncRam n index a
 catAsyncRam = CatMem {..} where
-    toChange (Read readIx, write) = case write of
-        Write writeIx a -> (readIx, Just (writeIx, a))
-        DontWrite       -> (readIx, Nothing)
+    toChange (Read readIx, write) = 
+        let write' = case write of
+                Write writeIx a -> Just (writeIx, a)
+                DontWrite       -> Nothing
+        in (readIx, write')
 
     memorize sn c = asyncRam sn (fst <$> c) (snd <$> c)
 
