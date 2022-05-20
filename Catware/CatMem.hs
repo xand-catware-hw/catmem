@@ -103,10 +103,9 @@ catMealy
     -> (i -> v -> (o, b))
     -> Signal dom i
     -> Signal dom o
-catMealy m r f i =
-    let y = f <$> i <*> x
-        x = runMem m r $ snd <$> y
-    in fst <$> y
+catMealy m r f i = fst <$> y where
+    y = f <$> i <*> x
+    x = runMem m r $ snd <$> y
 
 -- | Create a Mealy machine from a CatMem that takes a transition
 -- function already fmapped into Signal.
@@ -123,11 +122,10 @@ catMealyA
     -> m
     -> Signal dom (v -> (o, b))
     -> Signal dom o
-catMealyA m r f =
-    let y = f <*> x
-        x = runMem m r $ snd <$> y
-    in fst <$> y
-
+catMealyA m r f = fst <$> y where
+    y = f <*> x
+    x = runMem m r $ snd <$> y
+    
 
 -- | Common register with enable.
 --
